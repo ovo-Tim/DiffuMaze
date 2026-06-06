@@ -18,91 +18,77 @@ fn partition_region_chain(
         return vec![HashSet::new(); parts];
     }
 
-    let mut regions = vec![HashSet::new(); parts];
-    let mut unclaimed = cells.clone();
-    let target = (cells.len() / parts).max(1);
-    let mut seed = *cells.iter().choose(rng).unwrap();
-
-    for (part, region) in regions.iter_mut().enumerate() {
-        if unclaimed.is_empty() {
-            break;
-        }
-        if !unclaimed.contains(&seed) {
-            seed = *unclaimed.iter().choose(rng).unwrap();
-        }
-
-        let limit = if part == parts - 1 { unclaimed.len() } else { target };
-        let mut queue = VecDeque::new();
-        queue.push_back(seed);
-
-        while let Some(cell) = queue.pop_front() {
-            if !unclaimed.remove(&cell) {
-                continue;
-            }
-            region.insert(cell);
-            if region.len() >= limit {
-                break;
-            }
-
-            let (mi, mj) = cell;
-            let mut neighbors = Vec::new();
-            for (dy, dx) in &[(0i32, 1i32), (0, -1), (1, 0), (-1, 0)] {
+    let neighbors = |(mi, mj): (usize, usize)| {
+        [(0i32, 1i32), (0, -1), (1, 0), (-1, 0)]
+            .into_iter()
+            .filter_map(move |(dy, dx)| {
                 let ni = mi as i32 + dy;
                 let nj = mj as i32 + dx;
                 if ni >= 0 && nj >= 0 {
-                    let next = (ni as usize, nj as usize);
-                    if unclaimed.contains(&next) {
-                        neighbors.push(next);
-                    }
+                    Some((ni as usize, nj as usize))
+                } else {
+                    None
                 }
-            }
-            neighbors.shuffle(rng);
-            for next in neighbors {
-                queue.push_back(next);
+            })
+    };
+
+    let bfs = |start: (usize, usize)| {
+        let mut queue = VecDeque::new();
+        let mut parent: HashMap<(usize, usize), Option<(usize, usize)>> = HashMap::new();
+        let mut last = start;
+        parent.insert(start, None);
+        queue.push_back(start);
+
+        while let Some(cell) = queue.pop_front() {
+            last = cell;
+            for next in neighbors(cell) {
+                if cells.contains(&next) && !parent.contains_key(&next) {
+                    parent.insert(next, Some(cell));
+                    queue.push_back(next);
+                }
             }
         }
 
-        seed = region
-            .iter()
-            .flat_map(|&(mi, mj)| {
-                [(0i32, 1i32), (0, -1), (1, 0), (-1, 0)]
-                    .into_iter()
-                    .filter_map(move |(dy, dx)| {
-                        let ni = mi as i32 + dy;
-                        let nj = mj as i32 + dx;
-                        if ni >= 0 && nj >= 0 {
-                            Some((ni as usize, nj as usize))
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .find(|cell| unclaimed.contains(cell))
-            .or_else(|| unclaimed.iter().copied().next())
-            .unwrap_or(seed);
+        (last, parent)
+    };
+
+    let start = *cells.iter().choose(rng).unwrap();
+    let (end_a, _) = bfs(start);
+    let (end_b, parent) = bfs(end_a);
+
+    let mut spine = Vec::new();
+    let mut current = end_b;
+    loop {
+        spine.push(current);
+        match parent[&current] {
+            Some(prev) => current = prev,
+            None => break,
+        }
+    }
+    spine.reverse();
+
+    let mut regions = vec![HashSet::new(); parts];
+    let mut claimed = HashSet::new();
+    let mut queue = VecDeque::new();
+
+    for (idx, &cell) in spine.iter().enumerate() {
+        let region_idx = (idx * parts / spine.len()).min(parts - 1);
+        regions[region_idx].insert(cell);
+        claimed.insert(cell);
+        queue.push_back((region_idx, cell));
     }
 
-    if !unclaimed.is_empty() {
-        for cell in unclaimed {
-            let (best_idx, _) = regions
-                .iter()
-                .enumerate()
-                .filter(|(_, region)| !region.is_empty())
-                .map(|(idx, region)| {
-                    let min_dist = region
-                        .iter()
-                        .map(|&owned| {
-                            let dy = cell.0 as i64 - owned.0 as i64;
-                            let dx = cell.1 as i64 - owned.1 as i64;
-                            dy * dy + dx * dx
-                        })
-                        .min()
-                        .unwrap_or(0);
-                    (idx, min_dist)
-                })
-                .min_by_key(|&(_, dist)| dist)
-                .unwrap();
-            regions[best_idx].insert(cell);
+    while let Some((region_idx, cell)) = queue.pop_front() {
+        let mut next_cells: Vec<(usize, usize)> = neighbors(cell)
+            .filter(|next| cells.contains(next) && !claimed.contains(next))
+            .collect();
+        next_cells.shuffle(rng);
+
+        for next in next_cells {
+            if claimed.insert(next) {
+                regions[region_idx].insert(next);
+                queue.push_back((region_idx, next));
+            }
         }
     }
 
@@ -158,6 +144,97 @@ fn bridge_between_regions(
     }
 
     None
+}
+
+fn add_background_filler(
+    rng: &mut StdRng,
+    layer_grid: &mut [Vec<Vec<bool>>],
+    layer_cell_owner: &mut [Vec<Vec<usize>>],
+    width: usize,
+    height: usize,
+    maze_w: usize,
+    maze_h: usize,
+    goals: usize,
+) {
+    for l in 0..layer_grid.len() {
+        let route_grid = layer_grid[l].clone();
+        let mut safe_grid = vec![vec![false; width]; height];
+
+        for y in 0..height {
+            for x in 0..width {
+                if route_grid[y][x] {
+                    continue;
+                }
+
+                let touches_route = [(0i32, 1i32), (0, -1), (1, 0), (-1, 0)]
+                    .into_iter()
+                    .any(|(dy, dx)| {
+                        let ny = y as i32 + dy;
+                        let nx = x as i32 + dx;
+                        ny >= 0
+                            && nx >= 0
+                            && (ny as usize) < height
+                            && (nx as usize) < width
+                            && route_grid[ny as usize][nx as usize]
+                    });
+
+                safe_grid[y][x] = !touches_route;
+            }
+        }
+
+        let mut safe_cells = HashSet::new();
+        for mi in 0..maze_h {
+            for mj in 0..maze_w {
+                let (y, x) = maze_to_grid(mi, mj);
+                if y < height && x < width && safe_grid[y][x] {
+                    safe_cells.insert((mi, mj));
+                }
+            }
+        }
+
+        let mut unvisited = safe_cells.clone();
+        while let Some(start) = unvisited.iter().copied().choose(rng) {
+            let mut component = HashSet::new();
+            let mut queue = VecDeque::new();
+            unvisited.remove(&start);
+            component.insert(start);
+            queue.push_back(start);
+
+            while let Some((mi, mj)) = queue.pop_front() {
+                for (dy, dx) in &[(0i32, 1i32), (0, -1), (1, 0), (-1, 0)] {
+                    let ni = mi as i32 + dy;
+                    let nj = mj as i32 + dx;
+                    if ni >= 0 && nj >= 0 && (ni as usize) < maze_h && (nj as usize) < maze_w {
+                        let next = (ni as usize, nj as usize);
+                        if safe_cells.contains(&next) && unvisited.remove(&next) {
+                            component.insert(next);
+                            queue.push_back(next);
+                        }
+                    }
+                }
+            }
+
+            for &(mi, mj) in &component {
+                let (y, x) = maze_to_grid(mi, mj);
+                if !layer_grid[l][y][x] {
+                    layer_grid[l][y][x] = true;
+                    layer_cell_owner[l][y][x] = goals;
+                }
+            }
+
+            let filler_edges = generate_maze_dfs(rng, &component, maze_w, maze_h);
+            for &(a, b) in &filler_edges {
+                let (y1, x1) = maze_to_grid(a.0, a.1);
+                let (y2, x2) = maze_to_grid(b.0, b.1);
+                let wy = (y1 + y2) / 2;
+                let wx = (x1 + x2) / 2;
+                if wy < height && wx < width && safe_grid[wy][wx] && !layer_grid[l][wy][wx] {
+                    layer_grid[l][wy][wx] = true;
+                    layer_cell_owner[l][wy][wx] = goals;
+                }
+            }
+        }
+    }
 }
 
 pub fn generate_map(
@@ -256,7 +333,9 @@ pub fn generate_map(
                 candidates.dedup();
 
                 if candidates.is_empty() {
-                    bridge_path = bridge_between_regions(&base_regions[r], prev_region, next_region);
+                    let mut bridge_cells = prev_region.clone();
+                    bridge_cells.extend(next_region.iter().copied());
+                    bridge_path = bridge_between_regions(&bridge_cells, prev_region, next_region);
                     if let Some(path) = &bridge_path {
                         candidates = path
                             .iter()
@@ -541,6 +620,17 @@ pub fn generate_map(
         }
     }
 
+    add_background_filler(
+        &mut rng,
+        &mut layer_grid,
+        &mut layer_cell_owner,
+        width,
+        height,
+        maze_w,
+        maze_h,
+        goals,
+    );
+
     // Step 7: Build output arrays
     let mut puzzle = vec![0i8; layers * (goals + 1) * channel_size];
     let mut solution = vec![0i8; layers * channel_size];
@@ -566,7 +656,7 @@ pub fn generate_map(
             }
             for &(mi, mj) in &route_vias[r] {
                 let (vy, vx) = maze_to_grid(mi, mj);
-                if layer_grid[l][vy][vx] {
+                if layer_grid[l][vy][vx] && layer_cell_owner[l][vy][vx] == r {
                     puzzle[cp_offset + vy * width + vx] = 1;
                 }
             }
@@ -596,7 +686,7 @@ pub fn generate_map(
         for r in 0..goals {
             for &(mi, mj) in &route_vias[r] {
                 let (y, x) = maze_to_grid(mi, mj);
-                if layer_grid[l][y][x] {
+                if layer_grid[l][y][x] && layer_cell_owner[l][y][x] == r {
                     layer_vias[r].push((y, x));
                 }
             }
@@ -610,365 +700,4 @@ pub fn generate_map(
     }
 
     (MazeMap { puzzle, solution }, result_route_data)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-
-    fn via_count_per_route(data: &[LayerRouteData], goals: usize) -> Vec<usize> {
-        (0..goals)
-            .map(|r| {
-                data.iter()
-                    .flat_map(|layer| layer.vias[r].iter().copied())
-                    .collect::<HashSet<_>>()
-                    .len()
-            })
-            .collect()
-    }
-
-    fn via_on_solution(
-        map: &MazeMap,
-        data: &[LayerRouteData],
-        width: usize,
-        height: usize,
-        layers: usize,
-        goals: usize,
-    ) -> Vec<bool> {
-        let channel_size = height * width;
-        let mut result = vec![false; goals];
-        for r in 0..goals {
-            let any_via = data.iter().any(|layer| !layer.vias[r].is_empty());
-            if !any_via {
-                continue;
-            }
-            let mut via_cells_on_path = 0usize;
-            let mut _via_cells_total = 0usize;
-            for l in 0..layers {
-                let sol_offset = l * channel_size;
-                let cp_offset = l * (goals + 1) * channel_size + (r + 1) * channel_size;
-                for &(vy, vx) in &data[l].vias[r] {
-                    _via_cells_total += 1;
-                    if map.solution[sol_offset + vy * width + vx] == 1 {
-                        via_cells_on_path += 1;
-                    }
-                    if map.puzzle[cp_offset + vy * width + vx] == 1 {
-                        via_cells_on_path += 1;
-                    }
-                }
-            }
-            result[r] = via_cells_on_path > 0;
-        }
-        result
-    }
-
-    fn route_markers(
-        data: &[LayerRouteData],
-        layers: usize,
-        goals: usize,
-        route: usize,
-        include_vias: bool,
-    ) -> Vec<(usize, usize, usize)> {
-        let mut markers = Vec::new();
-        for l in 0..layers {
-            for &(y, x) in &data[l].checkpoints[route] {
-                markers.push((l, y, x));
-            }
-            if include_vias {
-                for &(y, x) in &data[l].vias[route] {
-                    markers.push((l, y, x));
-                }
-            }
-        }
-        assert!(route < goals);
-        markers
-    }
-
-    fn route_via_coords(
-        data: &[LayerRouteData],
-        layers: usize,
-        route: usize,
-    ) -> HashSet<(usize, usize)> {
-        let mut vias = HashSet::new();
-        for l in 0..layers {
-            for &(y, x) in &data[l].vias[route] {
-                vias.insert((y, x));
-            }
-        }
-        vias
-    }
-
-    fn route_reaches_all_markers(
-        map: &MazeMap,
-        data: &[LayerRouteData],
-        width: usize,
-        height: usize,
-        layers: usize,
-        goals: usize,
-        route: usize,
-        include_vias: bool,
-        removed_via: Option<(usize, usize)>,
-    ) -> bool {
-        let channel_size = height * width;
-        let markers = route_markers(data, layers, goals, route, include_vias);
-        if markers.len() <= 1 {
-            return true;
-        }
-
-        let marker_set: HashSet<(usize, usize, usize)> = markers.iter().copied().collect();
-        let via_coords = route_via_coords(data, layers, route);
-        let start = markers[0];
-
-        let is_open = |l: usize, y: usize, x: usize| {
-            let layer_offset = l * (goals + 1) * channel_size;
-            map.puzzle[layer_offset + y * width + x] == 0
-                && data[l].route_owner[y * width + x] as usize == route
-        };
-
-        if !is_open(start.0, start.1, start.2) {
-            return false;
-        }
-
-        let mut seen = HashSet::new();
-        let mut queue = VecDeque::new();
-        seen.insert(start);
-        queue.push_back(start);
-
-        while let Some((l, y, x)) = queue.pop_front() {
-            for (dy, dx) in &[(0i32, 1i32), (0, -1), (1, 0), (-1, 0)] {
-                let ny = y as i32 + dy;
-                let nx = x as i32 + dx;
-                if ny >= 0 && nx >= 0 && (ny as usize) < height && (nx as usize) < width {
-                    let next = (l, ny as usize, nx as usize);
-                    if is_open(next.0, next.1, next.2) && seen.insert(next) {
-                        queue.push_back(next);
-                    }
-                }
-            }
-
-            if via_coords.contains(&(y, x)) && removed_via != Some((y, x)) {
-                for next_l in 0..layers {
-                    if next_l != l
-                        && data[next_l].vias[route].contains(&(y, x))
-                        && is_open(next_l, y, x)
-                    {
-                        let next = (next_l, y, x);
-                        if seen.insert(next) {
-                            queue.push_back(next);
-                        }
-                    }
-                }
-            }
-        }
-
-        marker_set.iter().all(|marker| seen.contains(marker))
-    }
-
-    fn assert_all_route_markers_connected(
-        map: &MazeMap,
-        data: &[LayerRouteData],
-        width: usize,
-        height: usize,
-        layers: usize,
-        goals: usize,
-    ) {
-        for r in 0..goals {
-            assert!(
-                route_reaches_all_markers(map, data, width, height, layers, goals, r, true, None),
-                "Route {r}: not all checkpoints/vias are connected in the puzzle graph"
-            );
-        }
-    }
-
-    fn assert_all_vias_essential(
-        map: &MazeMap,
-        data: &[LayerRouteData],
-        width: usize,
-        height: usize,
-        layers: usize,
-        goals: usize,
-    ) {
-        for r in 0..goals {
-            assert!(
-                route_reaches_all_markers(map, data, width, height, layers, goals, r, false, None),
-                "Route {r}: checkpoints are not connected before via-essential check"
-            );
-            for via in route_via_coords(data, layers, r) {
-                assert!(
-                    !route_reaches_all_markers(
-                        map,
-                        data,
-                        width,
-                        height,
-                        layers,
-                        goals,
-                        r,
-                        false,
-                        Some(via)
-                    ),
-                    "Route {r}: via at {:?} is bypassable",
-                    via
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_multiple_vias_with_enough_checkpoints() {
-        let (map, data) = generate_map(42, 64, 64, 2, 2, 4, 3);
-        assert_all_route_markers_connected(&map, &data, 64, 64, 2, 2);
-        assert_all_vias_essential(&map, &data, 64, 64, 2, 2);
-        let counts = via_count_per_route(&data, 2);
-        for (r, &count) in counts.iter().enumerate() {
-            assert!(
-                count >= 2,
-                "Route {}: expected >= 2 vias with -c 4 -v 3, got {}",
-                r,
-                count
-            );
-        }
-        let on_path = via_on_solution(&map, &data, 64, 64, 2, 2);
-        for (r, &p) in on_path.iter().enumerate() {
-            let count = counts[r];
-            if count > 0 {
-                assert!(p, "Route {}: via not on solution path", r);
-            }
-        }
-    }
-
-    #[test]
-    fn test_few_checkpoints_many_vias() {
-        let (map, data) = generate_map(42, 64, 64, 2, 2, 2, 3);
-        assert_all_route_markers_connected(&map, &data, 64, 64, 2, 2);
-        assert_all_vias_essential(&map, &data, 64, 64, 2, 2);
-        let counts = via_count_per_route(&data, 2);
-        for (r, &count) in counts.iter().enumerate() {
-            assert_eq!(
-                count, 3,
-                "Route {}: expected 3 vias with -c 2 -v 3, got {}",
-                r, count
-            );
-        }
-    }
-
-    #[test]
-    fn test_via_count_matches_gaps() {
-        for checkpoints in 3..=6 {
-            let via_target = checkpoints - 1;
-            let (_map, data) = generate_map(99, 64, 64, 2, 2, checkpoints, via_target);
-            let counts = via_count_per_route(&data, 2);
-            for (r, &count) in counts.iter().enumerate() {
-                assert!(
-                    count >= 1,
-                    "Route {}: expected >= 1 via with c={} v={}, got {}",
-                    r,
-                    checkpoints,
-                    via_target,
-                    count
-                );
-                let expected = if checkpoints >= via_target + 1 {
-                    via_target
-                } else {
-                    checkpoints - 1
-                };
-                assert!(
-                    count <= expected,
-                    "Route {}: expected <= {} vias, got {}",
-                    r,
-                    expected,
-                    count
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_no_vias_with_single_layer() {
-        let (_, data) = generate_map(42, 64, 64, 1, 2, 4, 3);
-        let counts = via_count_per_route(&data, 2);
-        for (r, &count) in counts.iter().enumerate() {
-            assert_eq!(
-                count, 0,
-                "Route {}: expected 0 vias with 1 layer, got {}",
-                r, count
-            );
-        }
-    }
-
-    #[test]
-    fn test_no_vias_with_via_zero() {
-        let (_, data) = generate_map(42, 64, 64, 2, 2, 4, 0);
-        let counts = via_count_per_route(&data, 2);
-        for (r, &count) in counts.iter().enumerate() {
-            assert_eq!(
-                count, 0,
-                "Route {}: expected 0 vias with -v 0, got {}",
-                r, count
-            );
-        }
-    }
-
-    #[test]
-    fn test_vias_on_solution_path() {
-        let (map, data) = generate_map(42, 64, 64, 2, 2, 4, 3);
-        let on_path = via_on_solution(&map, &data, 64, 64, 2, 2);
-        for (r, &p) in on_path.iter().enumerate() {
-            let count = via_count_per_route(&data, 2)[r];
-            if count > 0 {
-                assert!(
-                    p,
-                    "Route {}: via exists but not on solution path or puzzle checkpoint",
-                    r
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_three_layers_multiple_vias() {
-        let (map, data) = generate_map(42, 64, 64, 3, 2, 4, 2);
-        assert_all_route_markers_connected(&map, &data, 64, 64, 3, 2);
-        assert_all_vias_essential(&map, &data, 64, 64, 3, 2);
-        let counts = via_count_per_route(&data, 2);
-        for (r, &count) in counts.iter().enumerate() {
-            assert!(
-                count >= 1,
-                "Route {}: expected >= 1 via with 3 layers -c 4 -v 2, got {}",
-                r,
-                count
-            );
-        }
-        let on_path = via_on_solution(&map, &data, 64, 64, 3, 2);
-        for (r, &p) in on_path.iter().enumerate() {
-            let count = counts[r];
-            if count > 0 {
-                assert!(p, "Route {}: via not on solution path", r);
-            }
-        }
-    }
-
-    #[test]
-    fn test_via_count_increases_with_checkpoints() {
-        let cases = vec![
-            (2usize, 1usize, 1usize),
-            (2, 2, 2),
-            (2, 3, 3),
-            (3, 2, 2),
-            (4, 3, 3),
-            (5, 3, 3),
-            (6, 4, 4),
-        ];
-        for (c, v, expected_vias) in &cases {
-            let (_, data) = generate_map(42, 64, 64, 2, 2, *c, *v);
-            let counts = via_count_per_route(&data, 2);
-            for (r, &count) in counts.iter().enumerate() {
-                assert_eq!(
-                    count, *expected_vias,
-                    "Route {}: -c {} -v {} -> expected {} vias, got {}",
-                    r, c, v, expected_vias, count
-                );
-            }
-        }
-    }
 }

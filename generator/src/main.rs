@@ -1,6 +1,8 @@
 mod cli;
 mod checkpoint;
 mod generation;
+#[cfg(test)]
+mod generation_tests;
 mod io;
 mod maze;
 mod region;
