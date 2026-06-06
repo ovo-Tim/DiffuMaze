@@ -106,7 +106,62 @@ python infer.py \
 | `--batch_size` | 16 | Batch size for batched inference |
 | `--device` | `cuda` | Device to run on |
 
-## Data Format
+## Visualization
+
+### GIF denoising progression
+
+Shows how the solution emerges from noise step by step.
+
+```bash
+cd solver/FlowMatching
+# Install extra deps first
+uv pip install imageio
+
+python visualize_denoise.py \
+    --checkpoint checkpoints/run_000/epoch_0009.pt \
+    --data_path ../maze.safetensors \
+    --sample_idx 0 \
+    --num_steps 100 --record_every 10
+```
+
+Output: per-layer images + GIF animation under `denoise_viz/`.
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--checkpoint` | (required) | Path to model checkpoint |
+| `--data_path` | `maze.safetensors` | Input puzzle data |
+| `--sample_idx` | 0 | Which sample to visualize |
+| `--num_steps` | 100 | Total Euler integration steps |
+| `--record_every` | 10 | Record one frame every N steps |
+| `--scale` | 8 | Pixel scale per maze cell |
+
+### Interactive explorer (Gradio UI)
+
+Adjust denoise steps and compare with ground truth interactively.
+
+```bash
+cd solver/FlowMatching
+uv pip install gradio
+python visualize_interactive.py \
+    --checkpoint checkpoints/run_000/epoch_0009.pt \
+    --data_path ../maze.safetensors
+```
+
+Opens at `http://127.0.0.1:7860`. Use `--share` for a public link.
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--checkpoint` | (required) | Path to model checkpoint |
+| `--data_path` | `maze.safetensors` | Input puzzle data |
+| `--port` | 7860 | Local server port |
+| `--share` | off | Create a public share link |
+
+Controls in the UI:
+- **Sample Index** — browse different mazes
+- **Layer** — view individual maze layers  
+- **Denoise Steps** — slider from 1–200; see how quality changes
+- Shows **Pixel Accuracy** and **IoU** in real time
+- Left panel = prediction, Right panel = ground truth
 
 Uses the same safetensors schema as the Rust generator in `generator/`.
 

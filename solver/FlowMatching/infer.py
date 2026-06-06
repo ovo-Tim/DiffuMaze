@@ -16,7 +16,10 @@ def load_model(checkpoint_path: str, device: str = "cuda"):
         num_res_blocks=checkpoint["num_res_blocks"],
         time_emb_dim=checkpoint["time_emb_dim"],
     )
-    model.load_state_dict(checkpoint["model_state_dict"])
+    state_dict = checkpoint["model_state_dict"]
+    if any(k.startswith("_orig_mod.") for k in state_dict):
+        state_dict = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
     return model, checkpoint
