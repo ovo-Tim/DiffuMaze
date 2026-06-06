@@ -37,7 +37,7 @@ def parse_ch_mults(s: str) -> tuple[int, ...]:
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, device, num_steps=20, global_step=0, aim_run=None):
+def evaluate(model, val_loader, device, num_steps=20, global_step=0, aim_run=None, amp=False):
     model.eval()
     total_correct = 0
     total_pixels = 0
@@ -51,21 +51,23 @@ def evaluate(model, val_loader, device, num_steps=20, global_step=0, aim_run=Non
         solution = solution.to(device)
         B, out_ch, H, W = solution.shape
 
-        t = torch.rand(B, device=device)
-        x_0 = torch.randn_like(solution)
-        x_1 = solution
-        x_t = (1 - t[:, None, None, None]) * x_0 + t[:, None, None, None] * x_1
-        v_target = x_1 - x_0
-        model_input = torch.cat([puzzle, x_t], dim=1)
-        v_pred = model(model_input, t)
-        val_loss += F.mse_loss(v_pred, v_target).item()
+        with torch.amp.autocast("cuda", enabled=amp):
+            t = torch.rand(B, device=device)
+            x_0 = torch.randn_like(solution)
+            x_1 = solution
+            x_t = (1 - t[:, None, None, None]) * x_0 + t[:, None, None, None] * x_1
+            v_target = x_1 - x_0
+            model_input = torch.cat([puzzle, x_t], dim=1)
+            v_pred = model(model_input, t)
+            val_loss += F.mse_loss(v_pred, v_target).item()
         val_batches += 1
 
         x = torch.randn_like(solution)
         dt = 1.0 / num_steps
         for i in range(num_steps):
             t_i = torch.full((B,), i * dt, device=device)
-            v = model(torch.cat([puzzle, x], dim=1), t_i)
+            with torch.amp.autocast("cuda", enabled=amp):
+                v = model(torch.cat([puzzle, x], dim=1), t_i)
             x = x + dt * v
         pred = ((x + 1) / 2 > 0.5).float()
         gt = ((solution + 1) / 2 > 0.5).float()
@@ -108,6 +110,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--aim_repo", type=str, default=".aim")
     parser.add_argument("--aim_experiment", type=str, default="DiffuMaze-FlowMatching")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="Enable mixed precision (default: on)")
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile (default: on)")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -144,6 +148,11 @@ def main():
         time_emb_dim=args.time_emb_dim,
     ).to(device)
 
+    if args.compile:
+        torch._dynamo.config.cache_size_limit = 64
+        torch._dynamo.config.optimize_ddp = False
+        model = torch.compile(model)
+
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])
 
@@ -151,6 +160,7 @@ def main():
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
 
     train_sampler = (
         DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -195,6 +205,8 @@ def main():
             "seed": args.seed,
             "val_ratio": args.val_ratio,
             "eval_steps": args.eval_steps,
+            "amp": args.amp,
+            "compile": args.compile,
         }
     else:
         aim_run = None
@@ -218,15 +230,17 @@ def main():
             x_t = (1 - t[:, None, None, None]) * x_0 + t[:, None, None, None] * x_1
             v_target = x_1 - x_0
 
-            model_input = torch.cat([puzzle, x_t], dim=1)
-            v_pred = model(model_input, t)
-
-            loss = F.mse_loss(v_pred, v_target)
+            with torch.amp.autocast("cuda", enabled=args.amp):
+                model_input = torch.cat([puzzle, x_t], dim=1)
+                v_pred = model(model_input, t)
+                loss = F.mse_loss(v_pred, v_target)
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             epoch_loss += loss.item()
             num_batches += 1
@@ -249,6 +263,7 @@ def main():
                     num_steps=args.eval_steps,
                     global_step=global_step,
                     aim_run=aim_run,
+                    amp=args.amp,
                 )
                 print(f" | val_loss={avg_val_loss:.6f} pixel_acc={pixel_acc:.4f} iou={iou:.4f}", end="")
 

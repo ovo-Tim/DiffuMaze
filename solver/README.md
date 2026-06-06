@@ -18,7 +18,7 @@ All training scripts are under `solver/FlowMatching/`.
 
 ```bash
 cd solver/FlowMatching
-python train.py --data_path ../maze.safetensors --batch_size 64
+python train.py --data_path ../maze.safetensors --batch_size 256
 ```
 
 ### Multi-GPU DDP (7 GPUs)
@@ -27,8 +27,19 @@ python train.py --data_path ../maze.safetensors --batch_size 64
 cd solver/FlowMatching
 CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 train.py \
     --data_path ../maze.safetensors \
-    --batch_size 64 \
+    --batch_size 256 \
     --epochs 200
+```
+
+`--amp` and `--compile` are **on by default**. Disable with `--no-amp` or `--no-compile` (e.g. if you run out of VRAM during compilation).
+
+When increasing batch size, scale LR correspondingly (e.g. batch 64→256, LR 1e-4→4e-4).
+
+Recommended fast config:
+```bash
+torchrun --nproc_per_node=7 train.py \
+    --data_path ../maze.safetensors \
+    --batch_size 256 --lr 4e-4
 ```
 
 ### Key Arguments
@@ -53,6 +64,8 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 train.py \
 | `--seed` | 42 | Random seed |
 | `--aim_repo` | `.aim` | Aim repo directory |
 | `--aim_experiment` | `DiffuMaze-FlowMatching` | Aim experiment name |
+| `--amp` | on | Mixed precision training. Use `--no-amp` to disable |
+| `--compile` | on | `torch.compile` on the UNet. Use `--no-compile` to disable |
 
 ## Monitoring
 
