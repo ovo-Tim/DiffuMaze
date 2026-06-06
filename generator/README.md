@@ -1,12 +1,31 @@
 # Multi-goal multi-layer non-intersecting maze map generator
 This is a Rust maze map generator that creates multi-goal, multi-layer, non-intersecting maze maps. The results will be saved as int8 Safetensors file.
 
-## Map Format
-Let's say we have a g goal, l layer and mxn maze map. The shape of the map is (l, g+1, m, n) where g+1 is the number of channels in the map. Each layer has following channels:
-- `0`: The wall channel
-- `g`: The checkpoint channel. We don't differentiate between the starting point and the endpoint. You just need to pass through all checkpoints.
+## Safetensors Schema
 
-Besides the puzzle map, we also provide the solution map. And the shape of the solution map is just (l, m, n). (0 for wall/empty, 1 for path)
+The output file contains two tensors:
+
+### `puzzle` — shape `(n, l, g+1, h, w)`, dtype `int8`
+
+- `n`: number of maps
+- `l`: layers per map
+- `g+1`: channels (channel 0 + g route checkpoint channels)
+- `h`: height
+- `w`: width
+
+| Channel | Description | Values |
+|---------|-------------|--------|
+| `0` | Walls | `1` = wall, `0` = passage |
+| `1..g` | Route checkpoints | `1` = checkpoint/via position for that route, `0` = otherwise |
+
+### `solution` — shape `(n, l, h, w)`, dtype `int8`
+
+| Value | Meaning |
+|-------|---------|
+| `1` | Part of any route's solution path |
+| `0` | Not on any solution path |
+
+Checkpoints are marked in the corresponding route's channel (`1..g`). Vias (through-holes connecting layers) are also marked as checkpoint positions — they appear in the same channel as the route they belong to.
 
 ## Parameters
 - `-w <width>`: The width of the maze map. Default 64
@@ -22,6 +41,28 @@ Besides the puzzle map, we also provide the solution map. And the shape of the s
 
 ## About non-intersecting
 No two routes will cross each other in the same layer. However, there is no restriction on the routes in different layers.
+
+## Rendering Color Schema
+When rendering with `-r`, the PNG images use the following colors:
+- **Black** `[0,0,0]`: Walls
+- **Gray** `[128,128,128]`: Maze passages not on any solution path
+- **Route colors**: Solution path cells, each route gets a distinct color from the palette below
+- **White** `[255,255,255]`: Checkpoints (start and end positions of routes)
+- **Yellow** `[255,255,0]`: Vias (through-holes connecting layers)
+
+Route color palette (applied cyclically for routes beyond 10):
+| Route | Color |
+|-------|-------|
+| 0 | Red `[220,50,50]` |
+| 1 | Green `[50,180,50]` |
+| 2 | Blue `[50,80,220]` |
+| 3 | Yellow-Green `[220,180,30]` |
+| 4 | Purple `[180,50,180]` |
+| 5 | Cyan `[50,180,180]` |
+| 6 | Orange `[200,120,50]` |
+| 7 | Magenta `[120,50,200]` |
+| 8 | Lime `[50,200,100]` |
+| 9 | Pink `[200,50,120]` |
 
 # Example
 ![example1](example1.png)
