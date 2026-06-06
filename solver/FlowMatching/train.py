@@ -9,25 +9,31 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler, random_spl
 
 from aim import Run
 
-from safetensors.torch import load_file
+from safetensors import safe_open
 
 from model import UNet
 
 
 class MazeDataset(Dataset):
     def __init__(self, data_path: str):
-        data = load_file(data_path)
-        self.puzzle = data["puzzle"].float()
-        self.solution = data["solution"].float()
+        self.data_path = data_path
+        with safe_open(data_path, framework="pt") as f:
+            s = f.get_slice("puzzle")
+            shape = s.get_shape()
+            self.n = shape[0]
+            self.l = shape[1]
+            self.g1 = shape[2]
+            self.h = shape[3]
+            self.w = shape[4]
 
     def __len__(self) -> int:
-        return len(self.puzzle)
+        return self.n
 
     def __getitem__(self, idx: int):
-        puzzle = self.puzzle[idx]
-        solution = self.solution[idx]
-        l, g1, h, w = puzzle.shape
-        puzzle = puzzle.reshape(l * g1, h, w)
+        with safe_open(self.data_path, framework="pt") as f:
+            puzzle = f.get_slice("puzzle")[idx].float()
+            solution = f.get_slice("solution")[idx].float()
+        puzzle = puzzle.reshape(self.l * self.g1, self.h, self.w)
         solution = 2.0 * solution - 1.0
         return puzzle, solution
 
@@ -124,6 +130,15 @@ def main():
         dist.init_process_group("nccl")
         torch.cuda.set_device(local_rank)
 
+    if rank == 0:
+        os.makedirs(args.checkpoint_dir, exist_ok=True)
+        existing = [d for d in os.listdir(args.checkpoint_dir) if d.startswith("run_")]
+        run_id = max((int(d.split("_")[1]) for d in existing if d.split("_")[1].isdigit()), default=-1) + 1
+        run_dir = os.path.join(args.checkpoint_dir, f"run_{run_id:03d}")
+        os.makedirs(run_dir, exist_ok=True)
+    else:
+        run_dir = None
+
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     full_dataset = MazeDataset(args.data_path)
@@ -191,6 +206,8 @@ def main():
             experiment=args.aim_experiment,
         )
         aim_run["hparams"] = {
+            "run_id": run_id,
+            "run_dir": run_dir,
             "lr": args.lr,
             "weight_decay": args.weight_decay,
             "epochs": args.epochs,
@@ -268,7 +285,6 @@ def main():
                 print(f" | val_loss={avg_val_loss:.6f} pixel_acc={pixel_acc:.4f} iou={iou:.4f}", end="")
 
             if (epoch + 1) % args.save_every == 0 or epoch == args.epochs - 1:
-                os.makedirs(args.checkpoint_dir, exist_ok=True)
                 state_dict = model.module.state_dict() if world_size > 1 else model.state_dict()
                 torch.save(
                     {
@@ -283,7 +299,7 @@ def main():
                         "num_res_blocks": args.num_res_blocks,
                         "time_emb_dim": args.time_emb_dim,
                     },
-                    os.path.join(args.checkpoint_dir, f"epoch_{epoch:04d}.pt"),
+                    os.path.join(run_dir, f"epoch_{epoch:04d}.pt"),
                 )
 
             print()
