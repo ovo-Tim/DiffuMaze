@@ -1,0 +1,12 @@
+[package]
+name = "generator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+rayon = "1"
+safetensors = "0.4"
+image = "0.25"
+bytemuck = "1"
