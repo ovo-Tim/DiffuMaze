@@ -2,7 +2,6 @@
 This is a Rust maze map generator that creates multi-goal, multi-layer, non-intersecting maze maps. The results will be saved as int8 Safetensors file.
 
 ## Safetensors Schema
-
 The output file contains two tensors:
 
 ### `puzzle` — shape `(n, l, g+1, h, w)`, dtype `int8`

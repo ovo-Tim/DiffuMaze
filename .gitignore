@@ -21,3 +21,6 @@ target
 #.idea/
 
 *.safetensors
+__pycache__/
+.aim
+checkpoints/

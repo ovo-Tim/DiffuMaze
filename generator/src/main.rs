@@ -1020,7 +1020,9 @@ fn main() {
         .map(|i| {
             let seed = (i as u64).wrapping_mul(0xDEADBEEF).wrapping_add(0xCAFE);
             let (map, data) = generate_map(seed, width, height, layers, goals, checkpoints, via);
-            eprintln!("  Generated map {}/{}", i + 1, total_maps);
+            if i%1000 == 0 {
+                eprintln!("  Generated map {}/{}", i + 1, total_maps);
+            }
             (map, data)
         })
         .collect();
