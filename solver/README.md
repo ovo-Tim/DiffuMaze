@@ -59,7 +59,7 @@ torchrun --nproc_per_node=7 train.py \
 | `--save_every` | 10 | Save checkpoint every N epochs |
 | `--log_every` | 50 | Log training loss every N batches |
 | `--eval_every` | 5 | Run validation every N epochs |
-| `--val_ratio` | 0.1 | Fraction of data held out for validation |
+| `--val_ratio` | 0.01 | Fraction of data held out for validation |
 | `--eval_steps` | 20 | Euler steps used during validation |
 | `--seed` | 42 | Random seed |
 | `--aim_repo` | `.aim` | Aim repo directory |

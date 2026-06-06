@@ -111,7 +111,7 @@ def main():
     parser.add_argument("--save_every", type=int, default=10)
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--eval_every", type=int, default=5)
-    parser.add_argument("--val_ratio", type=float, default=0.1)
+    parser.add_argument("--val_ratio", type=float, default=0.01)
     parser.add_argument("--eval_steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--aim_repo", type=str, default=".aim")
