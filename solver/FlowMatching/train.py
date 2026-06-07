@@ -118,6 +118,7 @@ def main():
     parser.add_argument("--aim_experiment", type=str, default="DiffuMaze-FlowMatching")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="Enable mixed precision (default: on)")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile (default: on)")
+    parser.add_argument("--load-prev", action="store_true", help="Resume from latest checkpoint in checkpoint_dir")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -130,14 +131,38 @@ def main():
         dist.init_process_group("nccl")
         torch.cuda.set_device(local_rank)
 
-    if rank == 0:
+    start_epoch = 0
+    load_ckpt = None
+
+    if args.load_prev:
         os.makedirs(args.checkpoint_dir, exist_ok=True)
-        existing = [d for d in os.listdir(args.checkpoint_dir) if d.startswith("run_")]
-        run_id = max((int(d.split("_")[1]) for d in existing if d.split("_")[1].isdigit()), default=-1) + 1
-        run_dir = os.path.join(args.checkpoint_dir, f"run_{run_id:03d}")
-        os.makedirs(run_dir, exist_ok=True)
+        runs = sorted([d for d in os.listdir(args.checkpoint_dir) if d.startswith("run_")])
+        if not runs:
+            raise ValueError(f"No previous runs found in {args.checkpoint_dir}")
+        latest_run = runs[-1]
+        run_dir = os.path.join(args.checkpoint_dir, latest_run)
+        run_id = int(latest_run.split("_")[1])
+        ckpts = sorted([f for f in os.listdir(run_dir) if f.startswith("epoch_") and f.endswith(".pt")])
+        if not ckpts:
+            raise ValueError(f"No checkpoints found in {run_dir}")
+        latest_ckpt = os.path.join(run_dir, ckpts[-1])
+        if rank == 0:
+            print(f"Resuming from {latest_ckpt}")
+        load_ckpt = torch.load(latest_ckpt, map_location="cpu", weights_only=False)
+        start_epoch = load_ckpt["epoch"] + 1
+        args.base_ch = load_ckpt["base_ch"]
+        args.ch_mults = ",".join(str(m) for m in load_ckpt["ch_mults"])
+        args.num_res_blocks = load_ckpt["num_res_blocks"]
+        args.time_emb_dim = load_ckpt["time_emb_dim"]
     else:
-        run_dir = None
+        if rank == 0:
+            os.makedirs(args.checkpoint_dir, exist_ok=True)
+            existing = [d for d in os.listdir(args.checkpoint_dir) if d.startswith("run_")]
+            run_id = max((int(d.split("_")[1]) for d in existing if d.split("_")[1].isdigit()), default=-1) + 1
+            run_dir = os.path.join(args.checkpoint_dir, f"run_{run_id:03d}")
+            os.makedirs(run_dir, exist_ok=True)
+        else:
+            run_dir = None
 
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
@@ -175,7 +200,21 @@ def main():
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    if load_ckpt is not None:
+        scheduler.load_state_dict(load_ckpt["scheduler_state_dict"])
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+
+    if load_ckpt is not None:
+        state_dict = load_ckpt["model_state_dict"]
+        if any(k.startswith("_orig_mod.") for k in state_dict):
+            state_dict = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+        load_target = model.module if world_size > 1 else model
+        load_target.load_state_dict(state_dict)
+        optimizer.load_state_dict(load_ckpt["optimizer_state_dict"])
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
 
     train_sampler = (
         DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -224,11 +263,13 @@ def main():
             "eval_steps": args.eval_steps,
             "amp": args.amp,
             "compile": args.compile,
+            "load_prev": args.load_prev,
+            "start_epoch": start_epoch,
         }
     else:
         aim_run = None
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -291,6 +332,7 @@ def main():
                         "epoch": epoch,
                         "model_state_dict": state_dict,
                         "optimizer_state_dict": optimizer.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
                         "loss": avg_loss,
                         "in_channels": in_channels,
                         "out_channels": out_channels,
