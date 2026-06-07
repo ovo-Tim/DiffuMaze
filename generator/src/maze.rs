@@ -6,10 +6,6 @@ pub fn maze_to_grid(mi: usize, mj: usize) -> (usize, usize) {
     (2 * mi + 1, 2 * mj + 1)
 }
 
-pub fn grid_to_maze(y: usize, x: usize) -> (usize, usize) {
-    ((y - 1) / 2, (x - 1) / 2)
-}
-
 pub fn generate_maze_dfs(
     rng: &mut StdRng,
     region: &HashSet<(usize, usize)>,
