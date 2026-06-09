@@ -121,3 +121,42 @@ class UNet(nn.Module):
                 x = block(x, t_emb)
 
         return self.conv_out(x)
+
+
+class UNetSmall(UNet):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        base_ch: int = 64,
+        ch_mults: tuple[int, ...] = (1, 2, 4),
+        num_res_blocks: int = 2,
+        time_emb_dim: int = 256,
+    ):
+        super().__init__(in_channels, out_channels, base_ch, ch_mults, num_res_blocks, time_emb_dim)
+
+
+class UNetXSmall(UNet):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        base_ch: int = 32,
+        ch_mults: tuple[int, ...] = (1, 2, 4),
+        num_res_blocks: int = 1,
+        time_emb_dim: int = 128,
+    ):
+        super().__init__(in_channels, out_channels, base_ch, ch_mults, num_res_blocks, time_emb_dim)
+
+
+class UNetXXSmall(UNet):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        base_ch: int = 16,
+        ch_mults: tuple[int, ...] = (1, 2, 4),
+        num_res_blocks: int = 1,
+        time_emb_dim: int = 32,
+    ):
+        super().__init__(in_channels, out_channels, base_ch, ch_mults, num_res_blocks, time_emb_dim)
