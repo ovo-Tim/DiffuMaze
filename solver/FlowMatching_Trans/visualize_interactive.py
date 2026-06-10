@@ -36,7 +36,7 @@ def run_denoise(sample_idx, layer_name, num_steps):
 
     puzzle_input = puzzle_batch[sample_idx : sample_idx + 1].to(_DEVICE)
     B, _, H, W = puzzle_input.shape
-    out_c = _MODEL.conv_out.out_channels
+    out_c = _MODEL.out_channels
     x = torch.randn(B, out_c, H, W, device=_DEVICE)
     dt = 1.0 / num_steps
 
@@ -55,10 +55,14 @@ def run_denoise(sample_idx, layer_name, num_steps):
         label = f"Step {i + 1}/{num_steps}"
 
         h_img = render_heatmap(_P_CHK, x_t[layer_idx], scale=8)
-        heatmaps.append(concat_images(h_img, _GT_IMG, label_left=label, label_right="Ground Truth"))
+        heatmaps.append(
+            concat_images(h_img, _GT_IMG, label_left=label, label_right="Ground Truth")
+        )
 
         c_img = render_colored(_P_CHK, sol_t, scale=8)
-        coloreds.append(concat_images(c_img, _GT_IMG, label_left=label, label_right="Ground Truth"))
+        coloreds.append(
+            concat_images(c_img, _GT_IMG, label_left=label, label_right="Ground Truth")
+        )
 
     sol_pred_bin = (sol_t > 0.5).float()
     sol_gt_layer = sol_gt_bin[layer_idx]
@@ -96,15 +100,23 @@ def on_mode_change(mode, step_val):
 
 
 def build_ui():
-    with gr.Blocks(title="Maze Denoising Explorer", theme=gr.themes.Soft()) as demo:
-        gr.Markdown("# Maze Denoising Explorer")
-        gr.Markdown("Run denoising, then step through the animation to see the solution emerge.")
+    with gr.Blocks(title="Maze Denoising Explorer") as demo:
+        gr.Markdown("# Maze Denoising Explorer (Transformer)")
+        gr.Markdown(
+            "Run denoising, then step through the animation to see the solution emerge."
+        )
 
         with gr.Row():
             with gr.Column(scale=1):
-                sample_slider = gr.Slider(0, _N - 1, step=1, value=0, label="Sample Index")
-                layer_radio = gr.Radio([f"Layer {i}" for i in range(_L)], value="Layer 0", label="Layer")
-                steps_slider = gr.Slider(2, 200, step=1, value=50, label="Total Denoise Steps")
+                sample_slider = gr.Slider(
+                    0, _N - 1, step=1, value=0, label="Sample Index"
+                )
+                layer_radio = gr.Radio(
+                    [f"Layer {i}" for i in range(_L)], value="Layer 0", label="Layer"
+                )
+                steps_slider = gr.Slider(
+                    2, 200, step=1, value=50, label="Total Denoise Steps"
+                )
 
                 denoise_btn = gr.Button("Denoise", variant="primary", size="lg")
 
@@ -124,9 +136,9 @@ def build_ui():
         gr.Markdown("---")
         gr.Markdown("### Step Animation")
         with gr.Row():
-            back_btn = gr.Button("◀")
-            next_btn = gr.Button("▶")
-            play_btn = gr.Button("Play ▶▶", variant="primary")
+            back_btn = gr.Button("\u25c0")
+            next_btn = gr.Button("\u25b6")
+            play_btn = gr.Button("Play \u25b6\u25b6", variant="primary")
         step_slider = gr.Slider(0, 1, step=1, value=0, label="Step", interactive=True)
 
         gr.Markdown("---")
@@ -180,15 +192,27 @@ def build_ui():
             show_progress="hidden",
         )
 
-        next_btn.click(fn=step_fwd, inputs=[step_slider], outputs=[step_slider], show_progress="hidden")
-        back_btn.click(fn=step_back, inputs=[step_slider], outputs=[step_slider], show_progress="hidden")
+        next_btn.click(
+            fn=step_fwd,
+            inputs=[step_slider],
+            outputs=[step_slider],
+            show_progress="hidden",
+        )
+        back_btn.click(
+            fn=step_back,
+            inputs=[step_slider],
+            outputs=[step_slider],
+            show_progress="hidden",
+        )
         play_btn.click(fn=on_play_click, outputs=[step_slider], show_progress="hidden")
 
     return demo
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Interactive denoising visualization")
+    parser = argparse.ArgumentParser(
+        description="Interactive denoising visualization (Transformer)"
+    )
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--data_path", type=str, default="maze.safetensors")
     parser.add_argument("--port", type=int, default=7860)
@@ -209,7 +233,7 @@ def main():
     print(f"Dataset: {_N} samples, {_L} layers, {_G1 - 1} routes, {_H}x{_W}")
 
     demo = build_ui()
-    demo.launch(server_port=args.port, share=args.share)
+    demo.launch(server_port=args.port, share=args.share, theme=gr.themes.Soft())
 
 
 if __name__ == "__main__":

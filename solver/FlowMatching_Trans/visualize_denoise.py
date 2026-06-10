@@ -7,14 +7,14 @@ from safetensors.torch import load_file
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model import UNet
+from model import Transformer, TransSmall, TransXSmall, TransXXSmall
 from infer import load_model
 from utils.viz import render_colored, render_heatmap, concat_images
 
 
 @torch.no_grad()
 def step_by_step(model, puzzle, num_steps=100, record_every=5, device="cuda"):
-    out_channels = model.conv_out.out_channels
+    out_channels = model.out_channels
     B, _, H, W = puzzle.shape
     x = torch.randn(B, out_channels, H, W, device=device)
     dt = 1.0 / num_steps
