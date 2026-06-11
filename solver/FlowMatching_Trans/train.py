@@ -11,7 +11,7 @@ from aim import Run
 
 from safetensors import safe_open
 
-from model import Transformer, TransSmall, TransXSmall, TransXXSmall
+from model import Transformer, TransSmall, TransXSmall, TransXXSmall, TransSmall_rope, TransXSmall_rope, TransXXSmall_rope
 
 
 class MazeDataset(Dataset):
@@ -132,7 +132,7 @@ def main():
     parser.add_argument("--aim_repo", type=str, default=".aim")
     parser.add_argument("--aim_experiment", type=str, default="DiffuMaze-FlowMatching-Trans")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="Enable mixed precision (default: on)")
-    parser.add_argument("--model", type=str, default="trans_small", choices=["trans_small", "trans_xsmall", "trans_xxsmall"], help="Model variant to use")
+    parser.add_argument("--model", type=str, default="trans_small", choices=["trans_small", "trans_xsmall", "trans_xxsmall", "trans_small_rope", "trans_xsmall_rope", "trans_xxsmall_rope"], help="Model variant to use")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile (default: on)")
     parser.add_argument("--grad_accum_steps", type=int, default=1, help="Gradient accumulation steps (default: 1)")
     parser.add_argument("--checkpoint", action=argparse.BooleanOptionalAction, default=True, help="Enable gradient checkpointing (default: on)")
@@ -140,9 +140,12 @@ def main():
     args = parser.parse_args()
 
     model_arch_defaults = {
-        "trans_small":    {"hidden_size": 288, "depth": 5, "num_heads": 4, "mlp_ratio": 3, "patch_size": 2, "time_emb_dim": 576},
-        "trans_xsmall":  {"hidden_size": 128, "depth": 5, "num_heads": 4, "mlp_ratio": 2, "patch_size": 2, "time_emb_dim": 256},
-        "trans_xxsmall":  {"hidden_size": 80, "depth": 3, "num_heads": 4, "mlp_ratio": 2, "patch_size": 2, "time_emb_dim": 80},
+        "trans_small":       {"hidden_size": 288, "depth": 5, "num_heads": 4, "mlp_ratio": 3, "patch_size": 2, "time_emb_dim": 576},
+        "trans_xsmall":      {"hidden_size": 128, "depth": 5, "num_heads": 4, "mlp_ratio": 2, "patch_size": 2, "time_emb_dim": 256},
+        "trans_xxsmall":     {"hidden_size": 80, "depth": 3, "num_heads": 4, "mlp_ratio": 2, "patch_size": 2, "time_emb_dim": 80},
+        "trans_small_rope":  {"hidden_size": 288, "depth": 5, "num_heads": 4, "mlp_ratio": 3, "patch_size": 2, "time_emb_dim": 576},
+        "trans_xsmall_rope": {"hidden_size": 128, "depth": 5, "num_heads": 4, "mlp_ratio": 2, "patch_size": 2, "time_emb_dim": 256},
+        "trans_xxsmall_rope":{"hidden_size": 80, "depth": 3, "num_heads": 4, "mlp_ratio": 2, "patch_size": 2, "time_emb_dim": 80},
     }
     for k, v in model_arch_defaults[args.model].items():
         if getattr(args, k) is None:
@@ -208,7 +211,13 @@ def main():
     in_channels = puzzle_sample.shape[0] + solution_sample.shape[0]
     out_channels = solution_sample.shape[0]
 
-    model_class = {"trans_xsmall": TransXSmall, "trans_xxsmall": TransXXSmall}.get(args.model, TransSmall)
+    model_class = {
+        "trans_xsmall": TransXSmall,
+        "trans_xxsmall": TransXXSmall,
+        "trans_small_rope": TransSmall_rope,
+        "trans_xsmall_rope": TransXSmall_rope,
+        "trans_xxsmall_rope": TransXXSmall_rope,
+    }.get(args.model, TransSmall)
     model = model_class(
         in_channels=in_channels,
         out_channels=out_channels,

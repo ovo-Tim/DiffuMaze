@@ -26,7 +26,7 @@ class SinusoidalTimeEmbedding(nn.Module):
 def _get_1d_sincos_pos_embed(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
     assert embed_dim % 2 == 0
     omega = torch.arange(embed_dim // 2, device=pos.device, dtype=torch.float32)
-    omega = 1.0 / (10000 ** (omega / embed_dim))
+    omega = 1.0 / (10000 ** (omega / (embed_dim // 2)))
     pos = pos.flatten()
     out = pos[:, None] * omega[None, :]
     return torch.cat([out.sin(), out.cos()], dim=-1)
@@ -45,6 +45,35 @@ def get_2d_sincos_pos_embed(embed_dim: int, H: int, W: int, device: torch.device
     return pos_embed.reshape(H * W, embed_dim)
 
 
+def precompute_2d_rope(head_dim: int, H: int, W: int, device: torch.device, base: float = 10000.0) -> tuple[torch.Tensor, torch.Tensor]:
+    assert head_dim % 4 == 0, f"head_dim ({head_dim}) must be divisible by 4 for 2D RoPE"
+    half_pairs = head_dim // 4
+    inv_freq = 1.0 / (base ** (torch.arange(0, half_pairs, device=device, dtype=torch.float32) * 2.0 / (head_dim // 2)))
+    h_pos = torch.arange(H, device=device, dtype=torch.float32)
+    h_angles = h_pos[:, None] * inv_freq[None, :]
+    h_cos, h_sin = h_angles.cos(), h_angles.sin()
+    w_pos = torch.arange(W, device=device, dtype=torch.float32)
+    w_angles = w_pos[:, None] * inv_freq[None, :]
+    w_cos, w_sin = w_angles.cos(), w_angles.sin()
+    cos = torch.cat([
+        h_cos[:, None, :].expand(H, W, -1),
+        w_cos[None, :, :].expand(H, W, -1),
+    ], dim=-1).reshape(H * W, head_dim // 2)
+    sin = torch.cat([
+        h_sin[:, None, :].expand(H, W, -1),
+        w_sin[None, :, :].expand(H, W, -1),
+    ], dim=-1).reshape(H * W, head_dim // 2)
+    return cos, sin
+
+
+def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., 0::2]
+    x2 = x[..., 1::2]
+    cos = cos.unsqueeze(0).unsqueeze(0).to(x.dtype)
+    sin = sin.unsqueeze(0).unsqueeze(0).to(x.dtype)
+    return torch.stack([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1).reshape(x.shape)
+
+
 class AdaLNModulation(nn.Module):
     def __init__(self, hidden_size: int, num_modulations: int = 6):
         super().__init__()
@@ -60,18 +89,26 @@ class AdaLNModulation(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int):
+    def __init__(self, hidden_size: int, num_heads: int, use_rope: bool = False, qk_norm: bool = True):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
         self.qkv = nn.Linear(hidden_size, 3 * hidden_size)
         self.proj = nn.Linear(hidden_size, hidden_size)
+        self.use_rope = use_rope
+        self.q_norm = nn.LayerNorm(self.head_dim, elementwise_affine=False) if qk_norm else nn.Identity()
+        self.k_norm = nn.LayerNorm(self.head_dim, elementwise_affine=False) if qk_norm else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos=None, sin=None) -> torch.Tensor:
         B, N, D = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        if self.use_rope and cos is not None:
+            q = apply_rotary_emb(q, cos, sin)
+            k = apply_rotary_emb(k, cos, sin)
         x = F.scaled_dot_product_attention(q, k, v)
         x = x.transpose(1, 2).reshape(B, N, D)
         x = self.proj(x)
@@ -79,10 +116,10 @@ class Attention(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: int = 4):
+    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: int = 4, use_rope: bool = False, qk_norm: bool = True):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False)
-        self.attn = Attention(hidden_size, num_heads)
+        self.attn = Attention(hidden_size, num_heads, use_rope=use_rope, qk_norm=qk_norm)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_size, mlp_ratio * hidden_size),
@@ -91,10 +128,10 @@ class DiTBlock(nn.Module):
         )
         self.adaLN_modulation = AdaLNModulation(hidden_size, num_modulations=6)
 
-    def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, c: torch.Tensor, cos=None, sin=None) -> torch.Tensor:
         shift1, scale1, shift2, scale2, gate1, gate2 = self.adaLN_modulation(c).chunk(6, dim=-1)
         x_norm = self.norm1(x) * (1 + scale1.unsqueeze(1)) + shift1.unsqueeze(1)
-        attn_out = self.attn(x_norm)
+        attn_out = self.attn(x_norm, cos=cos, sin=sin)
         x = x + gate1.unsqueeze(1) * attn_out
         x_norm = self.norm2(x) * (1 + scale2.unsqueeze(1)) + shift2.unsqueeze(1)
         mlp_out = self.mlp(x_norm)
@@ -138,6 +175,10 @@ class Transformer(nn.Module):
         self.patch_size = patch_size
         self.out_channels = out_channels
         self.use_checkpoint = use_checkpoint
+
+        self.depth = depth
+        self.num_heads = num_heads
+        self.mlp_ratio = mlp_ratio
 
         self.time_embed = nn.Sequential(
             SinusoidalTimeEmbedding(time_emb_dim),
@@ -222,6 +263,87 @@ class TransXSmall(Transformer):
 
 
 class TransXXSmall(Transformer):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_size: int = 80,
+        depth: int = 3,
+        num_heads: int = 4,
+        mlp_ratio: int = 2,
+        patch_size: int = 2,
+        time_emb_dim: int = 80,
+        **kwargs,
+    ):
+        super().__init__(in_channels, out_channels, hidden_size, depth, num_heads, mlp_ratio, patch_size, time_emb_dim, **kwargs)
+
+
+class TransformerWithRoPE(Transformer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.head_dim = self.hidden_size // self.num_heads
+        self.blocks = nn.ModuleList([
+            DiTBlock(self.hidden_size, self.num_heads, self.mlp_ratio, use_rope=True)
+            for _ in range(self.depth)
+        ])
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        t_emb = self.time_embed(t)
+        x = self.patch_embed(x)
+        h, w = x.shape[2], x.shape[3]
+        x = x.flatten(2).transpose(1, 2)
+
+        cos, sin = precompute_2d_rope(self.head_dim, h, w, x.device)
+
+        for block in self.blocks:
+            if self.use_checkpoint and self.training:
+                x = checkpoint(
+                    partial(block.__class__.forward, block),
+                    x, t_emb, cos, sin,
+                    use_reentrant=False,
+                )
+            else:
+                x = block(x, t_emb, cos=cos, sin=sin)
+
+        x = self.final_layer(x, t_emb)
+        x = self.unpatchify(x, H, W)
+        return x
+
+
+class TransSmall_rope(TransformerWithRoPE):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_size: int = 288,
+        depth: int = 5,
+        num_heads: int = 4,
+        mlp_ratio: int = 3,
+        patch_size: int = 2,
+        time_emb_dim: int = 576,
+        **kwargs,
+    ):
+        super().__init__(in_channels, out_channels, hidden_size, depth, num_heads, mlp_ratio, patch_size, time_emb_dim, **kwargs)
+
+
+class TransXSmall_rope(TransformerWithRoPE):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_size: int = 128,
+        depth: int = 5,
+        num_heads: int = 4,
+        mlp_ratio: int = 2,
+        patch_size: int = 2,
+        time_emb_dim: int = 256,
+        **kwargs,
+    ):
+        super().__init__(in_channels, out_channels, hidden_size, depth, num_heads, mlp_ratio, patch_size, time_emb_dim, **kwargs)
+
+
+class TransXXSmall_rope(TransformerWithRoPE):
     def __init__(
         self,
         in_channels: int,
