@@ -7,6 +7,73 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 
+@torch.compile
+def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor:
+    assert G.ndim >= 2
+    a, b, c = 3.4445, -4.7750, 2.0315
+    X = G.bfloat16()
+    X /= X.norm(dim=(-2, -1), keepdim=True).clamp(min=1e-7)
+    if X.size(-2) > X.size(-1):
+        X = X.mT
+    for _ in range(steps):
+        A = X @ X.mT
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+    return X.to(G.dtype)
+
+
+class Muon(torch.optim.Optimizer):
+    """Muon optimizer for hidden 2D+ weights.
+
+    Use AdamW for biases, norm parameters, embeddings, and output heads. This
+    implementation is intentionally local and single-process safe; DDP averages
+    gradients before the optimizer step, so no optimizer-internal collectives are
+    needed here.
+    """
+
+    def __init__(self, params, lr: float = 0.02, momentum: float = 0.95, weight_decay: float = 0.0, nesterov: bool = True):
+        defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay, nesterov=nesterov)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            momentum = group["momentum"]
+            weight_decay = group["weight_decay"]
+            nesterov = group["nesterov"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+                if grad.ndim < 2:
+                    raise ValueError("Muon expects only 2D or higher-dimensional parameters")
+                if weight_decay != 0:
+                    p.mul_(1 - lr * weight_decay)
+
+                state = self.state[p]
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(grad)
+                buf = state["momentum_buffer"]
+                buf.mul_(momentum).add_(grad)
+                update = grad.add(buf, alpha=momentum) if nesterov else buf
+
+                original_shape = update.shape
+                update = update.reshape(update.shape[0], -1)
+                update = zeropower_via_newtonschulz5(update)
+                update *= max(1.0, update.size(0) / update.size(1)) ** 0.5
+                p.add_(update.reshape(original_shape), alpha=-lr)
+
+        return loss
+
+
 class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, dim: int):
         super().__init__()

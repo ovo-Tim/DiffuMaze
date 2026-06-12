@@ -11,7 +11,7 @@ from aim import Run
 
 from safetensors import safe_open
 
-from model import Transformer, TransSmall, TransXSmall, TransXXSmall, TransSmall_rope, TransXSmall_rope, TransXXSmall_rope
+from model import Muon, Transformer, TransSmall, TransXSmall, TransXXSmall, TransSmall_rope, TransXSmall_rope, TransXXSmall_rope
 
 
 class MazeDataset(Dataset):
@@ -40,6 +40,102 @@ class MazeDataset(Dataset):
 
 def parse_ch_mults(s: str) -> tuple[int, ...]:
     return tuple(int(m) for m in s.split(","))
+
+
+class OptimizerBundle:
+    def __init__(self, optimizers):
+        self.optimizers = optimizers
+
+    @property
+    def param_groups(self):
+        return [group for optimizer in self.optimizers for group in optimizer.param_groups]
+
+    @property
+    def state(self):
+        state = {}
+        for optimizer in self.optimizers:
+            state.update(optimizer.state)
+        return state
+
+    def zero_grad(self, set_to_none: bool = True):
+        for optimizer in self.optimizers:
+            optimizer.zero_grad(set_to_none=set_to_none)
+
+    def step(self, *args, **kwargs):
+        for optimizer in self.optimizers:
+            optimizer.step(*args, **kwargs)
+
+    def state_dict(self):
+        return [optimizer.state_dict() for optimizer in self.optimizers]
+
+    def load_state_dict(self, state_dict):
+        for optimizer, optimizer_state in zip(self.optimizers, state_dict, strict=True):
+            optimizer.load_state_dict(optimizer_state)
+
+
+class SchedulerBundle:
+    def __init__(self, schedulers):
+        self.schedulers = schedulers
+
+    def step(self):
+        for scheduler in self.schedulers:
+            scheduler.step()
+
+    def get_last_lr(self):
+        return [lr for scheduler in self.schedulers for lr in scheduler.get_last_lr()]
+
+    def state_dict(self):
+        return [scheduler.state_dict() for scheduler in self.schedulers]
+
+    def load_state_dict(self, state_dict):
+        for scheduler, scheduler_state in zip(self.schedulers, state_dict, strict=True):
+            scheduler.load_state_dict(scheduler_state)
+
+
+def iter_optimizers(optimizer):
+    if isinstance(optimizer, OptimizerBundle):
+        return optimizer.optimizers
+    return (optimizer,)
+
+
+def build_optimizer(model, args):
+    if args.optimizer == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    muon_params = []
+    adamw_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim >= 2 and (".attn." in name or ".mlp." in name):
+            muon_params.append(param)
+        else:
+            adamw_params.append(param)
+
+    optimizers = []
+    if muon_params:
+        optimizers.append(Muon(
+            muon_params,
+            lr=args.muon_lr,
+            momentum=args.muon_momentum,
+            weight_decay=args.muon_weight_decay,
+        ))
+    if adamw_params:
+        optimizers.append(torch.optim.AdamW(
+            adamw_params,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        ))
+    return OptimizerBundle(optimizers)
+
+
+def build_scheduler(optimizer, args):
+    if isinstance(optimizer, OptimizerBundle):
+        return SchedulerBundle([
+            torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+            for opt in optimizer.optimizers
+        ])
+    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
 
 @torch.no_grad()
@@ -115,6 +211,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "muon"], help="Optimizer to use")
+    parser.add_argument("--muon_lr", type=float, default=0.02, help="Muon learning rate for hidden matrix weights")
+    parser.add_argument("--muon_momentum", type=float, default=0.95, help="Muon momentum")
+    parser.add_argument("--muon_weight_decay", type=float, default=0.01, help="Muon decoupled weight decay")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--hidden_size", type=int, default=None)
     parser.add_argument("--depth", type=int, default=None)
@@ -187,6 +287,10 @@ def main():
         args.patch_size = load_ckpt["patch_size"]
         args.time_emb_dim = load_ckpt["time_emb_dim"]
         args.model = load_ckpt.get("model_name", "trans_small")
+        args.optimizer = load_ckpt.get("optimizer_name", args.optimizer)
+        args.muon_lr = load_ckpt.get("muon_lr", args.muon_lr)
+        args.muon_momentum = load_ckpt.get("muon_momentum", args.muon_momentum)
+        args.muon_weight_decay = load_ckpt.get("muon_weight_decay", args.muon_weight_decay)
     else:
         if rank == 0:
             os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -238,10 +342,8 @@ def main():
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = build_optimizer(model, args)
+    scheduler = build_scheduler(optimizer, args)
     if load_ckpt is not None:
         scheduler.load_state_dict(load_ckpt["scheduler_state_dict"])
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
@@ -260,10 +362,11 @@ def main():
 
         load_target.load_state_dict(state_dict)
         optimizer.load_state_dict(load_ckpt["optimizer_state_dict"])
-        for state in optimizer.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(device)
+        for opt in iter_optimizers(optimizer):
+            for state in opt.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
 
     train_sampler = (
         DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -298,6 +401,10 @@ def main():
             "run_dir": run_dir,
             "lr": args.lr,
             "weight_decay": args.weight_decay,
+            "optimizer": args.optimizer,
+            "muon_lr": args.muon_lr,
+            "muon_momentum": args.muon_momentum,
+            "muon_weight_decay": args.muon_weight_decay,
             "epochs": args.epochs,
             "batch_size": args.batch_size * world_size,
             "hidden_size": args.hidden_size,
@@ -353,9 +460,11 @@ def main():
             epoch_loss += loss.item() * args.grad_accum_steps
 
             if num_batches % args.grad_accum_steps == 0:
-                scaler.unscale_(optimizer)
+                for opt in iter_optimizers(optimizer):
+                    scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
+                for opt in iter_optimizers(optimizer):
+                    scaler.step(opt)
                 scaler.update()
                 optimizer.zero_grad()
 
@@ -365,9 +474,11 @@ def main():
                 aim_run.track(scheduler.get_last_lr()[0], name="lr", step=global_step, context={"subset": "train"})
 
         if num_batches % args.grad_accum_steps != 0:
-            scaler.unscale_(optimizer)
+            for opt in iter_optimizers(optimizer):
+                scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
+            for opt in iter_optimizers(optimizer):
+                scaler.step(opt)
             scaler.update()
             optimizer.zero_grad()
 
@@ -406,6 +517,10 @@ def main():
                         "patch_size": args.patch_size,
                         "time_emb_dim": args.time_emb_dim,
                         "model_name": args.model,
+                        "optimizer_name": args.optimizer,
+                        "muon_lr": args.muon_lr,
+                        "muon_momentum": args.muon_momentum,
+                        "muon_weight_decay": args.muon_weight_decay,
                     },
                     os.path.join(run_dir, f"epoch_{epoch:04d}.pt"),
                 )
