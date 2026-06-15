@@ -3,13 +3,18 @@ import argparse
 import torch
 from safetensors.torch import load_file, save_file
 
-from model import Transformer, TransSmall, TransXSmall, TransXXSmall
+from model import TransSmall, TransSmall_rope, TransXSmall, TransXSmall_rope, TransXXSmall, TransXXSmall_rope
 
 
 def load_model(checkpoint_path: str, device: str = "cuda"):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model_class = {
-        "trans_xsmall": TransXSmall, "trans_xxsmall": TransXXSmall,
+        "trans_small": TransSmall,
+        "trans_xsmall": TransXSmall,
+        "trans_xxsmall": TransXXSmall,
+        "trans_small_rope": TransSmall_rope,
+        "trans_xsmall_rope": TransXSmall_rope,
+        "trans_xxsmall_rope": TransXXSmall_rope,
     }.get(checkpoint.get("model_name", "trans_small"), TransSmall)
     model = model_class(
         in_channels=checkpoint["in_channels"],

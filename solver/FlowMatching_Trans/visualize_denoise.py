@@ -7,7 +7,6 @@ from safetensors.torch import load_file
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model import Transformer, TransSmall, TransXSmall, TransXXSmall
 from infer import load_model
 from utils.viz import render_colored, render_heatmap, concat_images
 

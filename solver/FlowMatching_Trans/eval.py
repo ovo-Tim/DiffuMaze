@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from safetensors import safe_open
-from model import Transformer, TransSmall, TransXSmall, TransXXSmall
+from model import TransSmall, TransSmall_rope, TransXSmall, TransXSmall_rope, TransXXSmall, TransXXSmall_rope
 
 
 class MazeDataset(Dataset):
@@ -48,7 +48,12 @@ def main():
     sd = ckpt["model_state_dict"]
 
     model_class = {
-        "trans_xsmall": TransXSmall, "trans_xxsmall": TransXXSmall,
+        "trans_small": TransSmall,
+        "trans_xsmall": TransXSmall,
+        "trans_xxsmall": TransXXSmall,
+        "trans_small_rope": TransSmall_rope,
+        "trans_xsmall_rope": TransXSmall_rope,
+        "trans_xxsmall_rope": TransXXSmall_rope,
     }.get(ckpt.get("model_name", "trans_small"), TransSmall)
 
     model = model_class(
