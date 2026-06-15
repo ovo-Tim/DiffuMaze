@@ -424,3 +424,89 @@ class TransXXSmall_rope(TransformerWithRoPE):
         **kwargs,
     ):
         super().__init__(in_channels, out_channels, hidden_size, depth, num_heads, mlp_ratio, patch_size, time_emb_dim, **kwargs)
+
+
+class VAEEncoder(nn.Module):
+    def __init__(self, in_channels: int, hidden_size: int):
+        super().__init__()
+        self.conv_in = nn.Conv2d(in_channels, hidden_size, 3, 1, 1)
+        self.down = nn.Conv2d(hidden_size, hidden_size, 3, 2, 1)
+        self.conv1 = nn.Conv2d(hidden_size, hidden_size, 3, 1, 1)
+        self.conv2 = nn.Conv2d(hidden_size, hidden_size, 3, 1, 1)
+        self.norm = nn.GroupNorm(32, hidden_size)
+        self.silu = nn.SiLU()
+        self.mean_conv = nn.Conv2d(hidden_size, hidden_size, 1)
+        self.logvar_conv = nn.Conv2d(hidden_size, hidden_size, 1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x = self.silu(self.conv_in(x))
+        x = self.silu(self.down(x))
+        x = self.silu(self.conv1(x))
+        x = self.conv2(x)
+        x = self.silu(self.norm(x))
+        return self.mean_conv(x), self.logvar_conv(x)
+
+
+class VAEDecoder(nn.Module):
+    def __init__(self, hidden_size: int, out_channels: int):
+        super().__init__()
+        self.conv_in = nn.Conv2d(out_channels, hidden_size, 3, 1, 1)
+        self.conv1 = nn.Conv2d(hidden_size, hidden_size, 3, 1, 1)
+        self.norm = nn.GroupNorm(32, hidden_size)
+        self.silu = nn.SiLU()
+        self.up = nn.ConvTranspose2d(hidden_size, hidden_size // 2, 4, 2, 1)
+        self.conv_out = nn.Conv2d(hidden_size // 2, out_channels, 3, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.silu(self.conv_in(x))
+        x = self.silu(self.conv1(x))
+        x = self.silu(self.norm(x))
+        x = self.silu(self.up(x))
+        x = self.conv_out(x)
+        return x
+
+
+class TransSmall_rope_vae(TransformerWithRoPE):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_size: int = 288,
+        depth: int = 5,
+        num_heads: int = 4,
+        mlp_ratio: int = 3,
+        time_emb_dim: int = 576,
+        **kwargs,
+    ):
+        kwargs.pop("patch_size", None)
+        super().__init__(in_channels, out_channels, hidden_size, depth, num_heads, mlp_ratio, patch_size=1, time_emb_dim=time_emb_dim, **kwargs)
+        self.patch_embed = nn.Conv2d(hidden_size, hidden_size, 1, 1)
+        self.vae_encoder = VAEEncoder(in_channels, hidden_size)
+        self.vae_decoder = VAEDecoder(hidden_size, out_channels)
+
+    def reparameterize(self, mean: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        std = torch.exp(0.5 * logvar)
+        return mean + torch.randn_like(std) * std
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, C, H, W = x.shape
+        t_emb = self.time_embed(t)
+        mean, logvar = self.vae_encoder(x)
+        z = self.reparameterize(mean, logvar)
+        zH, zW = z.shape[2], z.shape[3]
+        x = self.patch_embed(z)
+        x = x.flatten(2).transpose(1, 2)
+        cos, sin = precompute_2d_rope(self.head_dim, zH, zW, x.device)
+        for block in self.blocks:
+            if self.use_checkpoint and self.training:
+                x = checkpoint(
+                    partial(block.__class__.forward, block),
+                    x, t_emb, cos, sin,
+                    use_reentrant=False,
+                )
+            else:
+                x = block(x, t_emb, cos=cos, sin=sin)
+        x = self.final_layer(x, t_emb)
+        x = self.unpatchify(x, zH, zW)
+        x = self.vae_decoder(x)
+        return x, mean, logvar

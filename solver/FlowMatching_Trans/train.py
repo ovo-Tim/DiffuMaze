@@ -11,7 +11,7 @@ from aim import Run
 
 from safetensors import safe_open
 
-from model import Muon, Transformer, TransSmall, TransXSmall, TransXXSmall, TransSmall_rope, TransXSmall_rope, TransXXSmall_rope
+from model import Muon, Transformer, TransSmall, TransXSmall, TransXXSmall, TransSmall_rope, TransXSmall_rope, TransXXSmall_rope, TransSmall_rope_vae
 
 
 class MazeDataset(Dataset):
@@ -162,7 +162,8 @@ def evaluate(model, val_loader, device, num_steps=20, global_step=0, aim_run=Non
             x_t = (1 - t[:, None, None, None]) * x_0 + t[:, None, None, None] * x_1
             v_target = x_1 - x_0
             model_input = torch.cat([puzzle, x_t], dim=1)
-            v_pred = model(model_input, t)
+            model_output = model(model_input, t)
+            v_pred = model_output[0] if isinstance(model_output, tuple) else model_output
             val_loss += F.mse_loss(v_pred, v_target).item()
         val_batches += 1
 
@@ -171,7 +172,8 @@ def evaluate(model, val_loader, device, num_steps=20, global_step=0, aim_run=Non
         for i in range(num_steps):
             t_i = torch.full((B,), i * dt, device=device)
             with torch.amp.autocast("cuda", enabled=amp):
-                v = model(torch.cat([puzzle, x], dim=1), t_i)
+                model_output = model(torch.cat([puzzle, x], dim=1), t_i)
+                v = model_output[0] if isinstance(model_output, tuple) else model_output
             x = x + dt * v
         pred = ((x + 1) / 2 > 0.5).float()
         gt = ((solution + 1) / 2 > 0.5).float()
@@ -231,11 +233,13 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--aim_repo", type=str, default=".aim")
     parser.add_argument("--aim_experiment", type=str, default="DiffuMaze-FlowMatching-Trans")
+    parser.add_argument("--aim-run-hash", type=str, default=None, help="Resume a specific Aim run by hash")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="Enable mixed precision (default: on)")
-    parser.add_argument("--model", type=str, default="trans_small", choices=["trans_small", "trans_xsmall", "trans_xxsmall", "trans_small_rope", "trans_xsmall_rope", "trans_xxsmall_rope"], help="Model variant to use")
+    parser.add_argument("--model", type=str, default="trans_small", choices=["trans_small", "trans_xsmall", "trans_xxsmall", "trans_small_rope", "trans_xsmall_rope", "trans_xxsmall_rope", "trans_small_rope_vae"], help="Model variant to use")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile (default: on)")
     parser.add_argument("--grad_accum_steps", type=int, default=1, help="Gradient accumulation steps (default: 1)")
     parser.add_argument("--checkpoint", action=argparse.BooleanOptionalAction, default=True, help="Enable gradient checkpointing (default: on)")
+    parser.add_argument("--kl_weight", type=float, default=1e-6, help="KL divergence weight for VAE")
     parser.add_argument("--load-prev", action="store_true", help="Resume from latest checkpoint in checkpoint_dir")
     args = parser.parse_args()
 
@@ -246,6 +250,7 @@ def main():
         "trans_small_rope":  {"hidden_size": 288, "depth": 5, "num_heads": 4, "mlp_ratio": 3, "patch_size": 2, "time_emb_dim": 576},
         "trans_xsmall_rope": {"hidden_size": 128, "depth": 5, "num_heads": 4, "mlp_ratio": 2, "patch_size": 2, "time_emb_dim": 256},
         "trans_xxsmall_rope":{"hidden_size": 80, "depth": 3, "num_heads": 4, "mlp_ratio": 2, "patch_size": 2, "time_emb_dim": 80},
+        "trans_small_rope_vae":{"hidden_size": 288, "depth": 5, "num_heads": 4, "mlp_ratio": 3, "patch_size": 1, "time_emb_dim": 576},
     }
     for k, v in model_arch_defaults[args.model].items():
         if getattr(args, k) is None:
@@ -288,9 +293,7 @@ def main():
         args.time_emb_dim = load_ckpt["time_emb_dim"]
         args.model = load_ckpt.get("model_name", "trans_small")
         args.optimizer = load_ckpt.get("optimizer_name", args.optimizer)
-        args.muon_lr = load_ckpt.get("muon_lr", args.muon_lr)
-        args.muon_momentum = load_ckpt.get("muon_momentum", args.muon_momentum)
-        args.muon_weight_decay = load_ckpt.get("muon_weight_decay", args.muon_weight_decay)
+        args.kl_weight = load_ckpt.get("kl_weight", args.kl_weight)
     else:
         if rank == 0:
             os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -321,6 +324,7 @@ def main():
         "trans_small_rope": TransSmall_rope,
         "trans_xsmall_rope": TransXSmall_rope,
         "trans_xxsmall_rope": TransXXSmall_rope,
+        "trans_small_rope_vae": TransSmall_rope_vae,
     }.get(args.model, TransSmall)
     model = model_class(
         in_channels=in_channels,
@@ -344,7 +348,7 @@ def main():
 
     optimizer = build_optimizer(model, args)
     scheduler = build_scheduler(optimizer, args)
-    if load_ckpt is not None:
+    if load_ckpt is not None and not args.load_prev:
         scheduler.load_state_dict(load_ckpt["scheduler_state_dict"])
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
 
@@ -367,6 +371,11 @@ def main():
                 for k, v in state.items():
                     if isinstance(v, torch.Tensor):
                         state[k] = v.to(device)
+        if args.load_prev:
+            for opt in iter_optimizers(optimizer):
+                lr = args.muon_lr if isinstance(opt, Muon) else args.lr
+                for pg in opt.param_groups:
+                    pg["lr"] = lr
 
     train_sampler = (
         DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
@@ -392,10 +401,15 @@ def main():
     )
 
     if rank == 0:
-        aim_run = Run(
-            repo=args.aim_repo,
-            experiment=args.aim_experiment,
-        )
+        if args.aim_run_hash:
+            aim_run = Run(run_hash=args.aim_run_hash, repo=args.aim_repo)
+        elif args.load_prev and load_ckpt is not None and "aim_run_hash" in load_ckpt:
+            aim_run = Run(run_hash=load_ckpt["aim_run_hash"], repo=args.aim_repo)
+        else:
+            aim_run = Run(
+                repo=args.aim_repo,
+                experiment=args.aim_experiment,
+            )
         aim_run["hparams"] = {
             "run_id": run_id,
             "run_dir": run_dir,
@@ -425,6 +439,7 @@ def main():
             "model_params": sum(p.numel() for p in model.parameters()),
             "load_prev": args.load_prev,
             "start_epoch": start_epoch,
+            "kl_weight": args.kl_weight,
         }
     else:
         aim_run = None
@@ -451,8 +466,13 @@ def main():
 
             with torch.amp.autocast("cuda", enabled=args.amp):
                 model_input = torch.cat([puzzle, x_t], dim=1)
-                v_pred = model(model_input, t)
+                model_output = model(model_input, t)
+                v_pred = model_output[0] if isinstance(model_output, tuple) else model_output
                 loss = F.mse_loss(v_pred, v_target) / args.grad_accum_steps
+                if isinstance(model_output, tuple):
+                    _, mean, logvar = model_output
+                    kl_loss = -0.5 * (1 + logvar - mean.pow(2) - logvar.exp()).mean()
+                    loss = loss + args.kl_weight * kl_loss / args.grad_accum_steps
 
             scaler.scale(loss).backward()
 
@@ -482,7 +502,8 @@ def main():
             scaler.update()
             optimizer.zero_grad()
 
-        scheduler.step()
+        if not args.load_prev:
+            scheduler.step()
         avg_loss = epoch_loss / num_batches
 
         if rank == 0:
@@ -521,6 +542,8 @@ def main():
                         "muon_lr": args.muon_lr,
                         "muon_momentum": args.muon_momentum,
                         "muon_weight_decay": args.muon_weight_decay,
+                        "aim_run_hash": aim_run.hash,
+                        "kl_weight": args.kl_weight,
                     },
                     os.path.join(run_dir, f"epoch_{epoch:04d}.pt"),
                 )
